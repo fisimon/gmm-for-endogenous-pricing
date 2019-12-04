@@ -80,7 +80,7 @@ function revenue(p, x, θ)
     sum(p .* multilogit(linear_utility(p,x, θ)))
 end
 
-p0 = [0.2 for _ =1:J];
+
 function best_price(θ, x)
     f = p -> -1* revenue(p, x, θ)
     optimize(f, p0, x_tol = 1e-2) |> Optim.minimizer
@@ -97,13 +97,15 @@ end
 ### END PRICE AND REVENUE ###
 
 ### ESTIMATION ###
-inner_optimizer = GradientDescent(linesearch=LineSearches.HagerZhang());
+inner_optimizer = GradientDescent(linesearch=LineSearches.BackTracking(order = 3));
 lower = [[-2.0, -0.1, -0.1] [-2.0, -0.1, -0.1] [-2.0, -0.1, -0.1]]';
 upper = [[-0.2, 5.0, 5.0] [-0.2, 5.0, 5.0] [-0.2, 5.0, 5.0]]';
 function optimize(estimator::AbstractEstimator, func)
     optimize(func, lower, upper, estimator.θ̂[end],
             Fminbox(inner_optimizer),
-            Optim.Options(x_tol = 1e-3, time_limit = 1))
+            Optim.Options(x_tol = 1e-4, time_limit = 10,
+                outer_iterations = 3),
+            )
 end
 
 function estimation(estimator::MLEEstimator, X,  Δp)
@@ -144,9 +146,9 @@ function estimation(estimator::GMMEstimator, X, Δp)
         for i=1:length(estimator.y)
             z = estimator.y[i] - multilogit(linear_utility(estimator.p̂[i], X[i], θ))
             for j=1:J
-                g[j] += z[j] * Δp[i][j]
+                g[j] += z[j] * estimator.p̂[i][j]
                 for m=1:M
-                    g[J*m + j] = z[j]*X[i][j]
+                    g[J*m + j] += z[j]*X[i][j]
                 end
             end
         end
@@ -176,19 +178,20 @@ end
 
 TRUE_PARAMETERS =[[-1.0, 3.2, 2.1] [-1.2, 2.7, 2.5] [-1.8, 3.5, 2.5]]';
 
-T = 100
+T = 1000
 J = 3
 M = 2
 
 g = Gumbel()
 x_dist = Uniform(0,2)
+p0 = [0.2 for _ =1:J];
 
-X = [rand(x_dist, J,M) for _=1:T];
+X = [[rand(x_dist, J,M-1) ones(J,1)] for _=1:T];
 E = [rand(g, J) for _=1:T ];
 
-δ = 1.0
-Δp = [];
-θ0 = [[-1.2, 0.0, 0.0] [-1.2, 0.0, 0.0] [-1.2, 0.0, 0.0]]';
+δ = 2.0
+Δp = [[ rand()> 0.5 ? δ : -δ for _=1:J] for _ =1:T];
+θ0 = [[-0.21, 0.0, 0.0] [-0.21, 0.0, 0.0] [-0.21, 0.0, 0.0]]';
 ### END PARAMETERS ###
 
 
@@ -203,8 +206,9 @@ oracle = OracleEstimator(TRUE_PARAMETERS);
 estimators = [lsquares, oracle, gmm];
 
 
+
 @time for t = 1:T
-    append!(Δp, [[ rand()> 0.5 ? δ : -δ for _=1:J]])
+
     Threads.@threads for e in estimators
         step_period(e, X[1:t], E[1:t], t, Δp[1:t])
     end
@@ -215,11 +219,34 @@ end
 
 
 
-
 ### END PROCEDURE ###
 
 
 ### ANALYSIS AND PLOTS ###
+
+function summarize(estimator::AbstractEstimator)
+    revenue = zeros(T);
+    for t=1:T
+        revenue[t] = estimator.y[t]' * estimator.p̂[t]
+        if t >1
+            revenue[t] += revenue[t-1]
+        end
+    end
+    return revenue
+end
+
+gmm_rev = summarize(gmm);
+oracle_rev = summarize(oracle);
+lsquares_rev = summarize(lsquares);
+
+revenues = DataFrame(Revenue = vcat(gmm_rev, oracle_rev, lsquares_rev),
+                     Period = vcat([i for i=1:T], [i for i=1:T], [i for i=1:T]),
+                     Estimator = vcat(["GMM" for i=1:T], ["Oracle" for i=1:T], ["LeastSquares" for i=1:T]));
+
+plot(revenues, x="Period", y="Revenue", color="Estimator", Geom.line)
+
+
+
 
 function to_dataframe(estimator::AbstractEstimator)
     α = []
@@ -247,6 +274,7 @@ function to_dataframe(estimator::AbstractEstimator)
     product = categorical(product),period = period, revenue=revenue)
 end
 
+
 df = to_dataframe(gmm);
 df2 = to_dataframe(lsquares);
 or = to_dataframe(oracle);
@@ -256,11 +284,24 @@ p2 = plot(df, x="price", color="product", Geom.density)
 
 p2 = plot(or, x="price", color="product", Geom.density)
 
-p = best_price(mle_est.θ̂[end], X[end])
+plot(or, x="y", color="product", Geom.density)
 
-revenue(p, X[end], mle_est.θ̂[end])
-multilogit(linear_utility(p, X[end], mle_est.θ̂[end]))
 
-mle_est.θ̂[end]
+
+g = zeros(J*(M+1));
+@time for i=1:length(gmm.y)
+    z = gmm.y[i] - multilogit(linear_utility(gmm.p̂[i], X[i], TRUE_PARAMETERS))
+    for j=1:J
+        g[j] += z[j] * Δp[i][j]
+        for m=1:M
+            g[J*m + j] += z[j]*X[i][j]
+        end
+    end
+end
+g = g ./ length(gmm.y)
+g' * g
+
+2*J +1
+
 
 ### END ANALYSIS AND PLOTS ###
